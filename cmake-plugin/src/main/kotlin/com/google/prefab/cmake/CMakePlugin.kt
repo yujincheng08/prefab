@@ -26,6 +26,9 @@ import com.google.prefab.api.PlatformDataInterface
 import java.io.File
 import java.nio.file.Files
 import java.nio.file.Path
+import kotlin.io.path.ExperimentalPathApi
+import kotlin.io.path.extension
+import kotlin.io.path.walk
 
 /**
  * Sanitizes a path for use in a CMake file.
@@ -114,6 +117,7 @@ class CMakePlugin(
         )
     }
 
+    @OptIn(ExperimentalPathApi::class)
     private fun emitModule(
         pkg: Package,
         module: Module,
@@ -139,6 +143,12 @@ class CMakePlugin(
         val libraries =
             (ldLibs + localReferences + externalReferences).joinToString(";")
 
+        val moduleInterfaces =
+            module.includePath.walk()
+                .filter { it.extension in arrayOf("ixx", "cppm", "ccm", "c++m", "cxxm") }
+                .map { it.sanitize() }
+                .joinToString(";")
+
         val target = "${pkg.name}::${module.name}"
         if (module.isHeaderOnly) {
             // No check for header-only modules without headers because there's
@@ -151,12 +161,34 @@ class CMakePlugin(
                 set_target_properties($target PROPERTIES
                     INTERFACE_INCLUDE_DIRECTORIES "$escapedHeaders"
                     INTERFACE_LINK_LIBRARIES "$libraries"
-                )
-                endif()
-
-
                 """.trimIndent()
             )
+
+            if (moduleInterfaces.isNotEmpty()) {
+                configFile.appendText(
+                    """
+                        IMPORTED_CXX_MODULES_COMPILE_FEATURES "cxx_std_20"
+                        IMPORTED_CXX_MODULES_INCLUDE_DIRECTORIES "$escapedHeaders"
+                    )
+                    if(NOT CMAKE_VERSION VERSION_LESS "3.23.0")
+                        target_sources($target INTERFACE FILE_SET CXX_MODULES
+                            BASE_DIRS "$escapedHeaders" FILES
+                            "$moduleInterfaces"
+                        )
+                    endif()
+                    endif()
+
+                    """.trimIndent()
+                )
+            } else {
+                configFile.appendText(
+                    """
+                    )
+                    endif()
+
+                    """.trimIndent()
+                )
+            }
         } else {
             try {
                 val prebuilt = module.getLibraryFor(requirements)
@@ -192,12 +224,34 @@ class CMakePlugin(
                 configFile.appendText(
                     """
                         INTERFACE_LINK_LIBRARIES "$libraries"
-                    )
-                    endif()
-
-
                     """.trimIndent()
                 )
+
+                if (moduleInterfaces.isNotEmpty()) {
+                    configFile.appendText(
+                        """
+                            IMPORTED_CXX_MODULES_COMPILE_FEATURES "cxx_std_20"
+                            IMPORTED_CXX_MODULES_INCLUDE_DIRECTORIES "$escapedHeaders"
+                        )
+                        if(NOT CMAKE_VERSION VERSION_LESS "3.23.0")
+                            target_sources($target INTERFACE FILE_SET CXX_MODULES
+                                BASE_DIRS "$escapedHeaders" FILES
+                                "$moduleInterfaces"
+                            )
+                        endif()
+                        endif()
+
+                        """.trimIndent()
+                    )
+                } else {
+                    configFile.appendText(
+                        """
+                        )
+                        endif()
+
+                        """.trimIndent()
+                    )
+                }
             } catch (ex: NoMatchingLibraryException) {
                 // Libraries that do not match our requirements should be logged
                 // and ignored.
